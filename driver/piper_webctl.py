@@ -32,14 +32,27 @@ Safety design
     flowing is reported as stale, never as a valid pose: the SDK returns its
     cached values forever, and cached zeros look like a plausible pose.
 
+Cartesian control (--cartesian smooth, the default)
+  The driver does its own IK and streams joints (JointCtrl, MOVE J) at 100 Hz from
+  a jerk-limited trajectory (Ruckig), so the firmware's IK is out of the loop.
+  Each Cartesian goal is planned (motion.py): the straight line if it's feasible,
+  else a joint-space move to the nearest IK solution, with via points when that
+  would leave the workspace box or dip below the table. Goals arriving at 10-20 Hz
+  only move the trajectory's target, so motion stays continuous. Joint moves
+  (sliders, HOME) go through the same trajectory. ACT streaming (/api/stream) is
+  unchanged. --cartesian firmware is the previous behaviour: EndPoseCtrl (MOVE P)
+  at 20 Hz to a target leashed a few millimetres ahead of the measured pose.
+
 Hard-won arm facts (see README.md): joint zero is a kinematic singularity where
 only Z can move, so HOME goes to the READY pose instead; streamed MOVE P is
-fastest with the target about one control period ahead, so Cartesian targets
-lead the measured pose by a few millimetres rather than jumping to the goal.
+fastest with the target about one control period ahead, so in firmware mode
+Cartesian targets lead the measured pose by a few millimetres rather than
+jumping to the goal.
 
 Units: degrees and millimetres throughout (the arm speaks 0.001 deg / mm).
 
     python3 piper_webctl.py [--bind 127.0.0.1] [--port 8770] [--iface can0] [--speed 15]
+                            [--cartesian smooth|firmware]
 """
 
 import argparse
@@ -58,6 +71,19 @@ except ImportError:
     raise SystemExit("piper_sdk not importable; use the venv at /opt/nervus/piper/venv")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The smooth Cartesian mode needs numpy and ruckig (requirements.txt). Without them the
+# driver still runs, in firmware mode, and says why in /api/state.
+try:
+    import sys as _sys
+    if HERE not in _sys.path:
+        _sys.path.insert(0, HERE)
+    import numpy as np
+    import kinematics as KIN
+    import motion as MOTION
+    SMOOTH_UNAVAILABLE = None
+except ImportError as _e:          # pragma: no cover - depends on the venv
+    np = KIN = MOTION = None
+    SMOOTH_UNAVAILABLE = f"{_e}; pip install -r requirements.txt"
 MDEG = 1000.0
 GRIP_UNIT = 1000.0
 JOINT_LIMITS = {1: (-154.0, 154.0), 2: (0.0, 195.0), 3: (-175.0, 0.0),
@@ -103,6 +129,12 @@ IK_GUARD_WINDOW = 0.5       # s
 IK_GUARD_RATIO = 3.0        # trip if swing > ratio x (TCP turn deg + TCP travel mm / 2)
 IK_GUARD_LATCH = 2.0        # s that servo goals are refused after a trip
 
+# Smooth mode. The trajectory limits, rates and planner settings are in motion.py.
+TRACK_ERR_DEG = 20.0        # measured joint this far from its command: blocked, or the arm ignores us
+FK_TOL_MM = 15.0            # our FK of the measured joints must match the arm's own pose this well
+JOINT_JOG_DEG_S = 12.0      # a held wrist key (firmware mode: 0.6 deg per 20 Hz tick)
+JJOG_LEAD_DEG = 3.0         # ... whose target stays this close to the commanded joint
+
 CTRL_MODES = {0x00: "STANDBY", 0x01: "CAN_CTRL", 0x02: "TEACHING_MODE",
               0x03: "ETHERNET_CTRL", 0x04: "WIFI_CTRL", 0x05: "REMOTE_CTRL",
               0x06: "LINKAGE_TEACHING_INPUT", 0x07: "OFFLINE_TRAJECTORY"}
@@ -138,6 +170,7 @@ STATE = {
     "speed": 15,
     "owner": None,            # {"client", "kind", "last"}
     "guard": None,            # last IK guard trip: {"time", "reason", "client"}
+    "plan": None,             # smooth mode: the last Cartesian plan (motion.Plan.summary())
     "log": [],
 }
 
@@ -240,7 +273,7 @@ def claim(client, kind):
 
 
 class Arm:
-    def __init__(self, iface, speed):
+    def __init__(self, iface, speed, cartesian="smooth", workspace=None, track_err_deg=TRACK_ERR_DEG):
         self.piper = C_PiperInterface_V2(iface)
         self.piper.ConnectPort()
         for _ in range(50):
@@ -257,7 +290,32 @@ class Arm:
         self.guard = FlipGuard()
         self._guard_mode = None    # the mode the guard's samples belong to
         self._stop = threading.Event()
-        threading.Thread(target=self._loop, daemon=True, name="control").start()
+        # Cartesian mode: "smooth" (our IK + planner + Ruckig, JointCtrl at 100 Hz) or
+        # "firmware" (EndPoseCtrl leashed at 20 Hz, the firmware's IK).
+        self.cartesian_note = None
+        if cartesian == "smooth" and SMOOTH_UNAVAILABLE:
+            self.cartesian_note = f"smooth mode unavailable ({SMOOTH_UNAVAILABLE}); using firmware"
+            print(self.cartesian_note, flush=True)
+            cartesian = "firmware"
+        self.cartesian = cartesian
+        self.smooth = cartesian == "smooth"
+        self.track_err_deg = track_err_deg
+        if self.smooth:
+            self.kin = KIN.PiperKinematics(0x01)
+            self.workspace = MOTION.Workspace(dict(workspace or WORKSPACE_MM))
+            self.planner = MOTION.Planner(self.kin, self.workspace)
+            self.jogger = MOTION.CartesianJog(self.kin, self.workspace)
+            self.follower = MOTION.Follower(MOTION.CONTROL_HZ)
+            self.plan_lock = threading.Lock()
+            self._last_plan = None          # (plan, follower path id, time)
+            self._applied_targets = None    # joint targets the follower was last given
+            self.fk_error_mm = None
+            self._dh_selected = False
+            self.overruns = 0
+            self._jog_note_t = 0.0
+            threading.Thread(target=self._loop_smooth, daemon=True, name="control").start()
+        else:
+            threading.Thread(target=self._loop, daemon=True, name="control").start()
 
     # ---------------------------------------------------------------- feedback
     def feedback_age(self):
@@ -332,7 +390,26 @@ class Arm:
         log_call("MotionCtrl_2", {"move_mode": hex(self.move_mode),
                                   "move_spd_rate_ctrl": self.speed, "can_id": "0x151"})
 
+    def _stop_targets(self):
+        """Smooth mode: brake the trajectory and return where it will stop (the measured joints
+        if it isn't running)."""
+        stop_q = self.follower.stop() if self.follower.active else None
+        return [float(v) for v in stop_q] if stop_q is not None else self.joints()
+
     def enter_joint(self):
+        if self.smooth:
+            tgt = self._stop_targets()
+            with state_lock:
+                STATE["mode"] = "joint"
+                STATE["targets"] = tgt
+                self._applied_targets = list(tgt)
+                STATE["jog"] = [0.0] * 6
+                STATE["jjog"] = [0.0] * 6
+                STATE["servo_goal"] = None
+            self.jogger.reset()
+            self.motion_ctrl(0x01)
+            log_call("MotionCtrl_2", {"move_mode": "0x01 MOVE J", "cartesian": "smooth", "can_id": "0x151"})
+            return
         with state_lock:
             STATE["mode"] = "joint"
             STATE["targets"] = self.joints()
@@ -343,6 +420,23 @@ class Arm:
         log_call("MotionCtrl_2", {"move_mode": "0x01 MOVE J", "can_id": "0x151"})
 
     def enter_cartesian(self, mode="cartesian"):
+        if self.smooth:
+            # Our own IK streams joints, so the arm stays in MOVE J. A servo client's plan
+            # replaces whatever is running; the panel's jog starts from a standstill.
+            if mode != "servo" and self.follower.active:
+                self.follower.stop()
+            with state_lock:
+                STATE["mode"] = mode
+                STATE["pose"] = self.end_pose()
+                STATE["jog"] = [0.0] * 6
+                STATE["jjog"] = [0.0] * 6
+                if mode != "servo":
+                    STATE["servo_goal"] = None
+            self.jogger.reset()
+            self.motion_ctrl(0x01)
+            log_call("MotionCtrl_2", {"move_mode": "0x01 MOVE J", "mode": mode, "cartesian": "smooth",
+                                      "can_id": "0x151"})
+            return
         with state_lock:
             STATE["mode"] = mode
             STATE["pose"] = self.end_pose()
@@ -359,6 +453,10 @@ class Arm:
             STATE["jog"] = [0.0] * 6
             STATE["jjog"] = [0.0] * 6
             STATE["servo_goal"] = None
+        if self.smooth:
+            # The ACT engine streams joints itself; the trajectory stops sending.
+            self.follower.deactivate()
+            self.jogger.reset()
         self.motion_ctrl(0x01)
         log_call("MotionCtrl_2", {"move_mode": "0x01 MOVE J", "mode": "stream", "can_id": "0x151"})
 
@@ -373,11 +471,17 @@ class Arm:
         self.motion_ctrl(0x01)
         log_call("MotionCtrl_2", {"ctrl_mode": "0x01 CAN", "move_mode": "0x01 MOVE J",
                                   "speed": self.speed, "can_id": "0x151"})
+        if self.smooth:
+            self.follower.deactivate()      # re-anchors at the measured joints on the next move
+            self.jogger.reset()
+            self.select_dh()
         with state_lock:
             STATE["enabled"] = True
             STATE["estopped"] = False
             STATE["mode"] = "joint"
             STATE["targets"] = self.joints()
+            if self.smooth:
+                self._applied_targets = list(STATE["targets"])
             STATE["pose"] = self.end_pose()
             STATE["servo_goal"] = None
 
@@ -385,6 +489,8 @@ class Arm:
         with state_lock:
             STATE["enabled"] = False
             STATE["owner"] = None
+        if self.smooth:
+            self.follower.deactivate()
         with io_lock:
             self.piper.DisableArm(7, 0x01)
         log_call("DisableArm", {"motor_num": 7, "enable_flag": "0x01", "can_id": "0x471"})
@@ -395,16 +501,37 @@ class Arm:
             STATE["estopped"] = True
             STATE["owner"] = None
             STATE["servo_goal"] = None
+        if self.smooth:
+            self.follower.deactivate()      # nothing more is streamed
         with io_lock:
             self.piper.EmergencyStop(0x01)
         log_call("EmergencyStop", {"flag": "0x01", "can_id": "0x150"})
 
-    def hold(self):
-        """Controlled stop: keep the motors on and hold the measured joints."""
+    def hold(self, hard=False):
+        """Controlled stop: keep the motors on and hold. In smooth mode the trajectory brakes to
+        a standstill at the brake limits (a fraction of a second); hard=True, or when nothing is
+        streaming, holds the measured joints at once, as firmware mode always does."""
         try:
             cur = self.joints()
         except Exception:
             return
+        if self.smooth and not hard and self.follower.active:
+            tgt = self._stop_targets()
+            with state_lock:
+                STATE["targets"] = tgt
+                self._applied_targets = list(tgt)
+                STATE["jog"] = [0.0] * 6
+                STATE["jjog"] = [0.0] * 6
+                STATE["servo_goal"] = None
+                STATE["mode"] = "joint"
+            self.jogger.reset()
+            log_call("hold", {"joints": [round(v, 1) for v in tgt], "note": "braking to a stop"})
+            return
+        if self.smooth:
+            self.follower.deactivate()
+            self.jogger.reset()
+            with state_lock:
+                self._applied_targets = list(cur)
         with state_lock:
             STATE["targets"] = cur
             STATE["jog"] = [0.0] * 6
@@ -480,16 +607,17 @@ class Arm:
             out.append(v)
         return out
 
-    def _trip(self, why, owner):
-        """The IK guard fired: hold where the arm is (motors stay on) and drop the
-        controller, whose goals are refused for IK_GUARD_LATCH seconds."""
+    def _trip(self, why, owner, hard=False):
+        """A guard fired: hold where the arm is (motors stay on) and drop the controller,
+        whose goals are refused for IK_GUARD_LATCH seconds. hard: hold the measured joints at
+        once instead of braking the trajectory (the trajectory is no longer where the arm is)."""
         with state_lock:
             STATE["guard"] = {"time": time.time(), "reason": why,
                               "client": owner["client"] if owner else None}
             STATE["owner"] = None
         self.guard.reset()
-        self.hold()
-        log_call("(ik guard)", {"reason": why, "action": "held"})
+        self.hold(hard=hard)
+        log_call("(ik guard)" if not hard else "(tracking guard)", {"reason": why, "action": "held"})
 
     def _loop(self):
         period = 1.0 / STREAM_HZ
@@ -554,6 +682,248 @@ class Arm:
                 elif enabled and mode not in ("stream",):
                     reason = "heartbeat lost"
                 log_call("(deadman)", {"reason": reason, "action": "stopped streaming"})
+
+    # ---------------------------------------------------------------- smooth mode
+    def select_dh(self):
+        """Pick the DH variant that matches the arm's own pose feedback (firmware >= V1.5-2
+        offsets J2 and J3 by 2 deg). Needs fresh feedback; tried again on enable."""
+        if self.feedback_age() >= FEEDBACK_STALE:
+            return
+        try:
+            kin, err = KIN.select_dh_variant(self.joints(), self.end_pose())
+        except Exception:
+            return
+        if kin.dh_variant != self.kin.dh_variant:
+            self.kin = self.planner.kin = self.jogger.kin = kin
+            log_call("kinematics", {"dh_variant": hex(kin.dh_variant), "fk_error_mm": round(err, 2)})
+        self.fk_error_mm = err
+        self._dh_selected = True
+
+    def check_fk(self, joints=None):
+        """How far (mm) our FK of the measured joints lands from the arm's own end pose."""
+        try:
+            q = joints if joints is not None else self.joints()
+            p, _ = self.kin.fk(q)
+            self.fk_error_mm = float(np.linalg.norm(p - np.asarray(self.end_pose()[:3])))
+        except Exception:
+            pass
+        return self.fk_error_mm
+
+    def kinematics_refusal(self):
+        """Why smooth Cartesian motion must not run now, or None."""
+        err = self.fk_error_mm
+        if err is not None and err > FK_TOL_MM:
+            return (f"the kinematic model doesn't match the arm (our FK is {err:.0f} mm off its own "
+                    "pose); run the driver with --cartesian firmware")
+        return None
+
+    def servo_goal(self, pose):
+        """Plan to a Cartesian goal and hand the path to the trajectory. The same goal sent
+        again (piperd and LLM Arm repeat theirs at 10 Hz) keeps the plan that is running."""
+        meas = self.joints()
+        with self.plan_lock:
+            q0 = self.follower.anchor(meas)
+            if self._last_plan is not None:
+                plan, pid, t = self._last_plan
+                same = plan.goal is not None and max(abs(a - b) for a, b in zip(plan.goal, pose)) < 0.05
+                if same and ((plan.moves and pid == self.follower.path_id)
+                             or (not plan.moves and time.time() - t < MOTION.REPLAN_FAILED_S)):
+                    return plan
+            plan = self.planner.plan_pose(q0, pose)
+            if plan.moves:
+                pid = plan.install(self.follower, anchor=meas)
+            else:
+                self.follower.stop()
+                pid = self.follower.path_id
+            self._last_plan = (plan, pid, time.time())
+        with state_lock:
+            STATE["plan"] = plan.summary()
+        if plan.kind not in ("line", "hold"):
+            log_call("plan", {"kind": plan.kind, "reason": plan.reason, "ms": round(plan.ms)})
+        return plan
+
+    def home(self):
+        """HOME = the READY pose, a joint-space move checked like a Cartesian plan."""
+        meas = self.joints()
+        with self.plan_lock:
+            q0 = self.follower.anchor(meas)
+            plan = self.planner.plan_joints(q0, READY_POSE)
+            with state_lock:
+                pid = self.follower.set_path(plan.path, plan.corners, 1.0, anchor=meas)
+                STATE["targets"] = list(READY_POSE)
+                self._applied_targets = list(READY_POSE)
+                STATE["plan"] = plan.summary()
+            self._last_plan = (plan, pid, time.time())
+        return plan
+
+    def _joint_tick(self, q, jjog, dt):
+        """Joint mode: held wrist keys move their targets; changed targets go to the trajectory."""
+        with state_lock:
+            if STATE["mode"] != "joint":
+                return
+            for jn in range(6):
+                if jjog[jn]:
+                    cur = STATE["targets"][jn]
+                    v = clamp(jn + 1, cur + (1.0 if jjog[jn] > 0 else -1.0) * JOINT_JOG_DEG_S * dt)
+                    if abs(v - q[jn]) <= JJOG_LEAD_DEG or abs(v - q[jn]) < abs(cur - q[jn]):
+                        STATE["targets"][jn] = v
+            tgt = [clamp(n + 1, float(v)) for n, v in enumerate(STATE["targets"])]
+            applied = self._applied_targets
+            if applied is None or any(abs(a - b) > 1e-9 for a, b in zip(tgt, applied)):
+                try:
+                    self.follower.set_target(tgt)
+                except RuntimeError:          # stopped meanwhile (E-stop, disable): nothing to do
+                    return
+                self._applied_targets = list(tgt)
+
+    def _jog_tick(self, q, jog, speed, dt):
+        """Panel jog: the held axes move a Cartesian carrot; releasing them brakes."""
+        dirs = [0 if not v else (1 if v > 0 else -1) for v in jog]
+        if any(dirs):
+            try:
+                self.follower.set_path(self.jogger.step(q, dirs, speed, dt), brisk=True)
+            except RuntimeError:              # stopped meanwhile (E-stop, disable)
+                return
+            if self.jogger.blocked and time.time() - self._jog_note_t > 1.0:
+                self._jog_note_t = time.time()
+                log_call("(jog)", {"blocked": self.jogger.blocked})
+        elif self.jogger.carrot is not None:
+            self.jogger.reset()
+            self.follower.stop()
+
+    def _loop_smooth(self):
+        """Smooth mode's control loop: one trajectory tick and one JointCtrl per period. A tick
+        that raises is logged and the arm holds the measured joints; the loop keeps running, so
+        the deadmen and stops keep working."""
+        period = 1.0 / MOTION.CONTROL_HZ
+        next_t = time.monotonic()
+        ctx = {"streaming": False, "last_fk": 0.0, "fault_seen": None, "error_t": 0.0}
+        while not self._stop.is_set():
+            next_t += period
+            delay = next_t - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            elif delay < -period:
+                self.overruns += 1             # never replay missed ticks in a burst
+                next_t = time.monotonic()
+            try:
+                self._smooth_tick(ctx, period)
+            except Exception as e:             # pragma: no cover - a bug, not a path
+                if time.time() - ctx["error_t"] > 1.0:
+                    ctx["error_t"] = time.time()
+                    print(f"control loop error: {e!r}; holding", flush=True)
+                    log_call("(control loop)", {"error": repr(e)[:200], "action": "held"})
+                try:
+                    with state_lock:
+                        enabled = STATE["enabled"] and not STATE["estopped"]
+                    if enabled:
+                        self.hold(hard=True)
+                except Exception:
+                    pass
+                ctx["streaming"] = False
+
+    def _smooth_tick(self, ctx, period):
+        fol = self.follower
+        now = time.time()
+        with state_lock:
+            enabled, estopped, mode = STATE["enabled"], STATE["estopped"], STATE["mode"]
+            jog, jjog = list(STATE["jog"]), list(STATE["jjog"])
+            goal = STATE["servo_goal"]
+            owner = owner_fresh(now)
+            hb_fresh = (now - STATE["last_heartbeat"]) < HEARTBEAT_TIMEOUT
+        speed = self.speed
+        if not enabled or estopped or mode == "stream":
+            if fol.active:
+                fol.deactivate()
+                self.jogger.reset()
+            if ctx["streaming"]:
+                ctx["streaming"] = False
+                if mode != "stream":
+                    log_call("(deadman)", {"reason": "disabled", "action": "stopped streaming"})
+            self.guard.reset()
+            self._guard_mode = None
+            return
+        # Who keeps the arm moving: the servo owner in servo mode, the heartbeat otherwise.
+        if mode == "servo":
+            live = owner is not None and owner["kind"] == "servo" and goal is not None
+            why_not = "servo deadman"
+        else:
+            live, why_not = hb_fresh, "heartbeat lost"
+        meas = None
+        if self.feedback_age() < FEEDBACK_STALE:
+            try:
+                meas = self.joints()
+            except Exception:
+                meas = None
+        if meas is None:
+            live, why_not = False, "feedback stale"     # brake, never steer blind
+        elif not self._dh_selected:
+            self.select_dh()
+        elif now - ctx["last_fk"] > 1.0:
+            self.check_fk(meas)
+            ctx["last_fk"] = now
+        q_cmd = fol.q                     # one snapshot: other threads may deactivate it
+        if q_cmd is None:
+            if not live:
+                if ctx["streaming"]:
+                    ctx["streaming"] = False
+                    log_call("(deadman)", {"reason": why_not, "action": "stopped streaming"})
+                return
+            q_cmd = fol.anchor(meas)
+        # Guards. Tracking: the arm must be where the trajectory says (else it is blocked,
+        # faulted or ignoring commands). IK flip: as in firmware mode, from the feedback.
+        tripped = False
+        if meas is not None:
+            err = np.abs(np.asarray(meas) - q_cmd)
+            worst = int(np.argmax(err))
+            if err[worst] > self.track_err_deg:
+                self._trip(f"J{worst + 1} is {err[worst]:.0f} deg from its command (blocked, or the "
+                           "arm is not following)", owner, hard=True)
+                ctx["streaming"] = False
+                return
+        if not live or mode not in ("cartesian", "servo") or mode != self._guard_mode:
+            self.guard.reset()
+        self._guard_mode = mode if live else None
+        if live and mode in ("cartesian", "servo"):
+            why = self.guard.update(now, meas, self.end_pose())
+            if why:
+                self._trip(why, owner)     # the trajectory brakes; the stop is streamed below
+                tripped = True
+        if live and not tripped:
+            if mode == "joint":
+                self._joint_tick(q_cmd, jjog, period)
+            elif mode == "cartesian":
+                self._jog_tick(q_cmd, jog, speed, period)
+            # servo: /api/servo hands plans to the trajectory
+        elif not live and fol.moving() and not fol.stopping:
+            fol.stop()
+            log_call("(deadman)", {"reason": why_not, "action": "braking to a stop"})
+        if not ((live and not tripped) or fol.moving() or fol.stopping):
+            if ctx["streaming"]:
+                ctx["streaming"] = False
+                log_call("(deadman)", {"reason": why_not, "action": "stopped streaming"})
+            if not live and fol.idle():
+                fol.deactivate()
+                self.jogger.reset()
+            return
+        q = fol.step(speed)
+        if q is None:
+            return
+        if fol.fault and fol.fault != ctx["fault_seen"]:
+            ctx["fault_seen"] = fol.fault
+            log_call("(trajectory)", {"fault": fol.fault, "action": "held"})
+        cmd = [int(round(clamp(n + 1, float(v)) * MDEG)) for n, v in enumerate(q)]
+        with io_lock:
+            # estop() sets the flag before it sends EmergencyStop under this lock, so a command
+            # can never follow an E-stop.
+            with state_lock:
+                go = STATE["enabled"] and not STATE["estopped"]
+            if not go:
+                return
+            self.piper.JointCtrl(*cmd)
+        with state_lock:
+            STATE["pose"] = self.kin.fk_pose(q)
+        ctx["streaming"] = True
 
     def close(self):
         self._stop.set()
@@ -667,7 +1037,18 @@ def state_json(lite=False):
             "guard": STATE["guard"], "ik_guard_deg": ARM.guard.limit,
             "ready_pose": READY_POSE, "workspace_mm": WORKSPACE_MM,
             "firmware": ARM.firmware,
+            # --- Cartesian control mode ---
+            "cartesian": ARM.cartesian,
+            "cartesian_note": ARM.cartesian_note,
+            "control_hz": MOTION.CONTROL_HZ if ARM.smooth else STREAM_HZ,
         }
+        if ARM.smooth:
+            body["plan"] = STATE["plan"]
+            body["trajectory"] = ARM.follower.snapshot()
+            body["fk_error_mm"] = finite(round(ARM.fk_error_mm, 2)) if ARM.fk_error_mm is not None else None
+            body["dh_variant"] = ARM.kin.dh_variant
+            body["jog_blocked"] = ARM.jogger.blocked or None
+            body["overruns"] = ARM.overruns
         if not lite:
             body["log"] = STATE["log"][:14]
     return body
@@ -771,6 +1152,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(409, {"error": "motors are not enabled"})
             if ARM.feedback_age() >= FEEDBACK_STALE:
                 return self._json(409, {"error": "arm feedback is stale"})
+            if ARM.smooth and ARM.kinematics_refusal():
+                return self._json(409, {"error": ARM.kinematics_refusal()})
             clamped = False
             for ax, key in enumerate(("x", "y", "z")):
                 lo, hi = WORKSPACE_MM[key]
@@ -793,6 +1176,10 @@ class Handler(BaseHTTPRequestHandler):
                 ARM.enter_cartesian("servo")
             with state_lock:
                 STATE["servo_goal"] = pose
+            if ARM.smooth:
+                plan = ARM.servo_goal(pose)
+                return self._json(200, {"ok": True, "goal": pose, "clamped": clamped,
+                                        "plan": plan.kind, "reason": plan.reason})
             return self._json(200, {"ok": True, "goal": pose, "clamped": clamped})
 
         if path == "/api/stream":
@@ -847,6 +1234,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("bad axis")
             if on and guard_latched():
                 return self._json(409, {"error": f"ik guard: {guard_latched()}", "guard": True})
+            if on and ARM.smooth and ARM.kinematics_refusal():
+                return self._json(409, {"error": ARM.kinematics_refusal()})
             if on:
                 claim(client, "panel")
             if STATE["mode"] != "cartesian":
@@ -891,9 +1280,15 @@ class Handler(BaseHTTPRequestHandler):
             if STATE["mode"] != "joint":
                 ARM.enter_joint()
             with state_lock:
-                STATE["targets"] = list(READY_POSE)
                 STATE["jjog"] = [0.0] * 6
                 STATE["last_heartbeat"] = time.time()
+            if ARM.smooth and STATE["enabled"] and ARM.feedback_age() < FEEDBACK_STALE:
+                plan = ARM.home()
+                log_call("JointCtrl", {"targets": READY_POSE, "note": f"home = READY pose ({plan.kind})",
+                                       "reason": plan.reason})
+                return self._json(200, {"ok": True, "targets": READY_POSE, "plan": plan.kind})
+            with state_lock:
+                STATE["targets"] = list(READY_POSE)
             log_call("JointCtrl", {"targets": READY_POSE, "note": "home = READY pose (MOVE J)"})
             return self._json(200, {"ok": True, "targets": READY_POSE})
 
@@ -912,10 +1307,25 @@ def main():
     ap.add_argument("--bind", default="127.0.0.1",
                     help="address to listen on (default loopback). 'auto' = the direct-link "
                          "IP if that Ethernet cable is up, else loopback.")
+    ap.add_argument("--cartesian", choices=("smooth", "firmware"), default="smooth",
+                    help="smooth (default): our IK and planner, joints streamed at 100 Hz from a "
+                         "jerk-limited trajectory (also for joint moves and HOME). firmware: the "
+                         "arm's own IK, EndPoseCtrl leashed at 20 Hz (the previous behaviour).")
+    ap.add_argument("--track-err-deg", type=float, default=TRACK_ERR_DEG,
+                    help="smooth mode: hold if a joint lags its command by more than this (deg)")
+    ap.add_argument("--workspace", metavar="X0,X1,Y0,Y1,Z0,Z1",
+                    help="the Cartesian box (mm) servo goals are clamped to and smooth-mode paths "
+                         "keep the TCP in (default %s)" % ",".join(
+                             f"{WORKSPACE_MM[k][0]:.0f},{WORKSPACE_MM[k][1]:.0f}" for k in "xyz"))
     args = ap.parse_args()
 
     if args.bind == "auto":
         args.bind = pick_bind_address()
+    if args.workspace:
+        v = [float(s) for s in args.workspace.split(",")]
+        if len(v) != 6 or not (v[0] < v[1] and v[2] < v[3] and v[4] < v[5]):
+            raise SystemExit("--workspace needs X0,X1,Y0,Y1,Z0,Z1 with each min < max")
+        WORKSPACE_MM.update({"x": (v[0], v[1]), "y": (v[2], v[3]), "z": (v[4], v[5])})
     try:
         with open(os.path.join(HERE, "panel.html"), "rb") as f:
             PANEL_HTML = f.read()
@@ -923,7 +1333,7 @@ def main():
         PANEL_HTML = b"<p>panel.html is missing; the API is still available under /api/.</p>"
     with state_lock:
         STATE["speed"] = args.speed
-    ARM = Arm(args.iface, args.speed)
+    ARM = Arm(args.iface, args.speed, cartesian=args.cartesian, track_err_deg=args.track_err_deg)
     ARM.guard.limit = max(0.0, args.ik_guard_deg)
     threading.Thread(target=stall_watchdog, args=(args.iface,), daemon=True, name="stall-watchdog").start()
     try:
@@ -940,12 +1350,13 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    print(f"PiPER driver listening on http://{args.bind}:{args.port} (firmware {ARM.firmware})", flush=True)
+    print(f"PiPER driver listening on http://{args.bind}:{args.port} (firmware {ARM.firmware}, "
+          f"cartesian {ARM.cartesian})", flush=True)
     try:
         srv.serve_forever()
     finally:
         try:
-            ARM.hold()
+            ARM.hold(hard=True)      # the control loop stops with us: hold the measured joints
         except Exception:
             pass
         ARM.close()

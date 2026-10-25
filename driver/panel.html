@@ -333,14 +333,18 @@ async function poll(){
     if(s.pose_current){const p=s.pose_current;
       let st=s.arm_status||'';
       let warn=/EXCEEDS_LIMIT|COLLISION|ERR|ABNORMAL/i.test(st)?'  ⚠ '+st+' — jog to a normal pose in JOINT mode first':(st?'  ['+st+']':'');
-      if(s.guard&&s.time-s.guard.time<10) warn+='  ⚠ IK guard held the arm: '+s.guard.reason;
+      if(s.guard&&s.time-s.guard.time<10) warn+='  ⚠ guard held the arm: '+s.guard.reason;
+      if(s.jog_blocked) warn+='  · jog: '+s.jog_blocked;
       $('posenow').textContent='TCP  X '+p[0].toFixed(0)+'  Y '+p[1].toFixed(0)+'  Z '+p[2].toFixed(0)+' mm'+warn;}
     const st=$('status');
     st.textContent=s.estopped?'E-STOPPED':(s.enabled?'ENABLED':'DISABLED');
     st.className='badge '+(s.enabled?'live':'halt');
     $('btnEnable').textContent=s.enabled?'DISABLE MOTORS':'ENABLE MOTORS';
     $('btnEnable').className=s.enabled?'on':'off';
-    $('hb').textContent='streaming @20Hz'+(s.enabled?'':' (idle)');
+    let plan='';
+    if(s.plan&&s.time-s.plan.time<15) plan=' · last plan: '+s.plan.kind+(s.plan.reason?' ('+s.plan.reason+')':'');
+    $('hb').textContent='streaming @'+(s.control_hz||20)+'Hz · '+(s.cartesian||'firmware')+' Cartesian'+
+      (s.enabled?'':' (idle)')+plan;
     J.forEach(j=>{
       const c=s.current[j-1],t=s.targets[j-1];
       $('v'+j).innerHTML=`<span class="cur">${c.toFixed(1)}°</span> → ${t.toFixed(1)}°`;

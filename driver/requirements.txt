@@ -1,2 +1,5 @@
 piper_sdk>=0.6.1
 python-can>=4.3
+# Smooth Cartesian mode (kinematics.py, motion.py). Tested with numpy 2.5.4 and ruckig 0.19.4.
+numpy>=1.24
+ruckig>=0.12

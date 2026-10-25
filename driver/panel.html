@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PiPER Control · Nervus OS</title>
+<style>
+:root{
+  --primary:#3B82F6; --secondary:#8B5CF6; --success:#16A34A;
+  --warning:#D97706; --danger:#DC2626; --surface:#FFFFFF; --text:#111827;
+  --muted:#6B7280; --line:#D1D5DB; --bg:#F3F4F6;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s6:24px; --s8:32px;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --disp:"Space Grotesk","Open Sans",system-ui,sans-serif;
+  --body:"Open Sans",system-ui,-apple-system,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root{
+  --surface:#111827; --text:#F9FAFB; --bg:#0B0F19; --line:#374151; --muted:#9CA3AF;}}
+*{box-sizing:border-box}
+body{margin:0;font-family:var(--body);font-size:16px;color:var(--text);
+  background:var(--bg);
+  background-image:radial-gradient(var(--line) 1px,transparent 1px);
+  background-size:4px 4px;}
+.wrap{max-width:940px;margin:0 auto;padding:var(--s6) var(--s4)}
+header{display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap;
+  margin-bottom:var(--s6)}
+h1{font-family:var(--disp);font-size:32px;margin:0;letter-spacing:-.02em}
+.sub{color:var(--muted);font-size:14px;font-family:var(--mono)}
+.panel{background:var(--surface);border:2px solid var(--text);
+  padding:var(--s4);margin-bottom:var(--s4);
+  box-shadow:4px 4px 0 var(--text)}
+.bar{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;
+  margin-bottom:var(--s4)}
+button{font-family:var(--disp);font-size:16px;font-weight:600;padding:var(--s2) var(--s4);
+  border:2px solid var(--text);background:var(--surface);color:var(--text);
+  cursor:pointer;box-shadow:2px 2px 0 var(--text)}
+button:hover{transform:translate(1px,1px);box-shadow:1px 1px 0 var(--text)}
+button:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
+button.on{background:var(--success);color:#fff}
+button.off{background:var(--muted);color:#fff}
+button.stop{background:var(--danger);color:#fff;font-size:18px}
+button.sm{font-size:14px;padding:var(--s1) var(--s2);font-family:var(--mono)}
+.joint{display:grid;grid-template-columns:64px 1fr auto;gap:var(--s3);
+  align-items:center;padding:var(--s3) 0;border-bottom:1px dashed var(--line)}
+.jname{font-family:var(--disp);font-weight:700;font-size:18px}
+.jrange{font-family:var(--mono);font-size:14px;color:var(--muted)}
+input[type=range]{width:100%;accent-color:var(--primary);height:28px}
+input[type=range]:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
+input[type=number]{font-family:var(--mono);font-size:14px;width:88px;
+  padding:var(--s1) var(--s2);border:2px solid var(--text);
+  background:var(--surface);color:var(--text)}
+.ctl{display:flex;gap:var(--s1);align-items:center;flex-wrap:wrap}
+.val{font-family:var(--mono);font-size:14px;min-width:120px;text-align:right}
+.cur{color:var(--secondary);font-weight:700}
+#log{font-family:var(--mono);font-size:14px;max-height:240px;overflow:auto;
+  background:var(--bg);border:2px solid var(--line);padding:var(--s3)}
+#log div{padding:2px 0;border-bottom:1px dotted var(--line);word-break:break-all}
+.fn{color:var(--primary);font-weight:700}
+.badge{font-family:var(--mono);font-size:14px;padding:2px var(--s2);
+  border:2px solid var(--text)}
+.badge.live{background:var(--success);color:#fff}
+.badge.halt{background:var(--danger);color:#fff}
+.empty{color:var(--muted);font-style:italic}
+h2{font-family:var(--disp);font-size:18px;margin:0 0 var(--s3)}
+/* ---- virtual keyboard (cartesian jog) ---- */
+.kbd{display:flex;gap:var(--s8);flex-wrap:wrap;margin:var(--s4) 0 0}
+.kcluster{display:flex;flex-direction:column;gap:var(--s2);align-items:center}
+.kcname{font-family:var(--disp);font-weight:700;font-size:12px;color:var(--muted);
+  letter-spacing:.12em;text-transform:uppercase}
+.krow{display:flex;gap:var(--s2);justify-content:center}
+.kcap{width:76px;height:66px;border:2px solid var(--text);box-shadow:3px 3px 0 var(--text);
+  background:var(--surface);color:var(--text);display:flex;flex-direction:column;
+  align-items:center;justify-content:center;border-radius:9px;cursor:pointer;
+  user-select:none;-webkit-user-select:none;transition:transform .05s,background .05s,box-shadow .05s}
+.kcap.blank{border:none;box-shadow:none;background:transparent;cursor:default}
+.kcap .glyph{font-family:var(--disp);font-weight:800;font-size:22px;line-height:1}
+.kcap .fn{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:4px;font-weight:600}
+.kcap .ax{font-family:var(--mono);font-size:9px;color:var(--muted);opacity:.6;margin-top:1px}
+.kcap.down{background:var(--primary);color:#fff;transform:translate(3px,3px);box-shadow:0 0 0 var(--text)}
+.kcap.down .fn,.kcap.down .ax{color:#fff;opacity:1}
+.kcap.rot.down{background:var(--secondary)}
+.kcap.wrist.down{background:var(--warning)}
+</style></head><body>
+<div class="wrap">
+<header>
+  <h1>PiPER Control</h1>
+  <span class="sub">Nervus OS · can0 · degrees authoritative</span>
+  <span id="status" class="badge halt">DISABLED</span>
+</header>
+
+<div class="panel">
+  <div class="bar">
+    <button id="btnEnable" class="off">ENABLE MOTORS</button>
+    <button id="btnHome">HOME → READY</button>
+    <button id="btnEstop" class="stop">■ E-STOP</button>
+    <button id="btnRecover" class="warn">↻ RECOVER</button>
+    <button id="btnMode" class="ghost">MODE · JOINT</button>
+    <span class="sub" id="hb">heartbeat —</span>
+  </div>
+  <div class="sub">Motors start disabled. Streaming stops if this tab closes (deadman).</div>
+</div>
+
+<div class="panel" id="cartHelp" style="display:none">
+  <h2>Keyboard control — hold a key to move, release to stop</h2>
+  <div class="sub"><b>Translate</b> (blue): arrows = X/Y, W/S = Z. &nbsp; <b>Gimbal</b> (violet, tip fixed): U/O roll · I/K pitch · J/L yaw. &nbsp; <b>Wrist joints</b> (amber, base fixed — tip arcs): A/D = J4 · Q/E = J5 · Z/C = J6. Mode switches automatically. Click the page once for keyboard focus; keep the workspace clear.</div>
+  <div class="kbd" id="kbd"></div>
+  <div class="sub" id="posenow" style="margin-top:var(--s4)">pose —</div>
+</div>
+
+<div class="panel">
+  <h2>Max speed</h2>
+  <div class="sub">Percentage of the arm's rated speed. Applies to every joint move.</div>
+  <div class="row">
+    <input type="range" id="ss" min="1" max="100" step="1" value="15"
+      aria-label="Maximum speed percent">
+    <input type="number" id="ns" min="1" max="100" step="1" value="15"
+      aria-label="Maximum speed percent">
+    <span class="val" id="vs"><span class="cur">15%</span></span>
+  </div>
+  <div class="row">
+    <button id="sp5"  class="ghost">Slow · 5%</button>
+    <button id="sp15" class="ghost">Safe · 15%</button>
+    <button id="sp40" class="ghost">Brisk · 40%</button>
+    <button id="sp100" class="warn">Max · 100%</button>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Joints</h2>
+  <div id="joints"><div class="empty">Loading joint state…</div></div>
+</div>
+
+<div class="panel">
+  <h2>Gripper</h2>
+  <div id="grip"></div>
+</div>
+
+<div class="panel">
+  <h2>CAN calls · function &amp; parameters</h2>
+  <div id="log"><div class="empty">No calls yet.</div></div>
+</div>
+</div>
+
+<script>
+const J=[1,2,3,4,5,6]; let LIM={}, GR=[0,70], built=false, enabled=false;
+const $=id=>document.getElementById(id);
+const pct=(v,lo,hi)=>((v-lo)/(hi-lo))*100;
+const deg=(p,lo,hi)=>lo+(p/100)*(hi-lo);
+
+async function post(u,b){try{await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});}catch(e){}}
+
+function build(){
+  $('joints').innerHTML='';
+  J.forEach(j=>{
+    const [lo,hi]=LIM[j];
+    const row=document.createElement('div'); row.className='joint';
+    row.innerHTML=`<div><div class="jname">J${j}</div><div class="jrange">${lo}…${hi}°</div></div>
+      <div><input type="range" id="s${j}" min="${lo}" max="${hi}" step="0.5" value="0"
+        aria-label="Joint ${j} angle in degrees"></div>
+      <div class="ctl">
+        <button class="sm" data-j="${j}" data-d="-20">−20%</button>
+        <button class="sm" data-j="${j}" data-d="-5">−5%</button>
+        <button class="sm" data-j="${j}" data-d="5">+5%</button>
+        <button class="sm" data-j="${j}" data-d="20">+20%</button>
+        <input type="number" id="n${j}" step="0.5" min="${lo}" max="${hi}"
+          aria-label="Joint ${j} target degrees">
+        <span class="val" id="v${j}">—</span>
+      </div>`;
+    $('joints').appendChild(row);
+  });
+  $('grip').innerHTML=`<div class="joint">
+      <div><div class="jname">GRIP</div><div class="jrange">${GR[0]}…${GR[1]}mm</div></div>
+      <div><input type="range" id="sg" min="${GR[0]}" max="${GR[1]}" step="1" value="0"
+        aria-label="Gripper opening in millimetres"></div>
+      <div class="ctl">
+        <button class="sm" id="gopen">OPEN</button><button class="sm" id="gclose">CLOSE</button>
+        <input type="number" id="ng" step="1" min="${GR[0]}" max="${GR[1]}"
+          aria-label="Gripper millimetres">
+        <span class="val" id="vg">—</span>
+      </div></div>`;
+
+  J.forEach(j=>{
+    const [lo,hi]=LIM[j];
+    $('s'+j).addEventListener('input',e=>send(j,parseFloat(e.target.value)));
+    $('n'+j).addEventListener('change',e=>send(j,parseFloat(e.target.value)));
+  });
+  document.querySelectorAll('button[data-j]').forEach(b=>{
+    b.addEventListener('click',()=>{
+      const j=+b.dataset.j,[lo,hi]=LIM[j];
+      const cur=parseFloat($('s'+j).value);
+      send(j, Math.max(lo,Math.min(hi, deg(pct(cur,lo,hi)+(+b.dataset.d),lo,hi))));
+    });
+  });
+  function setSpeed(v){
+    v=Math.max(1,Math.min(100,Math.round(v)));
+    $('ss').value=v; $('ns').value=v;
+    $('vs').innerHTML=`<span class="cur">${v}%</span>`;
+    post('/api/speed',{speed:v});
+  }
+  $('ss').addEventListener('input',e=>setSpeed(+e.target.value));
+  $('ns').addEventListener('change',e=>setSpeed(+e.target.value));
+  $('sp5').onclick=()=>setSpeed(5);
+  $('sp15').onclick=()=>setSpeed(15);
+  $('sp40').onclick=()=>setSpeed(40);
+  $('sp100').onclick=()=>{ if(confirm('Set MAXIMUM speed (100%)?\nThe arm will move at its full rated rate. Keep the e-stop in reach.')) setSpeed(100); };
+
+  $('sg').addEventListener('input',e=>post('/api/gripper',{mm:+e.target.value}));
+  $('ng').addEventListener('change',e=>post('/api/gripper',{mm:+e.target.value}));
+  $('gopen').onclick=()=>{$('sg').value=GR[1];post('/api/gripper',{mm:GR[1]});};
+  $('gclose').onclick=()=>{$('sg').value=GR[0];post('/api/gripper',{mm:GR[0]});};
+  buildKeyboard();
+  built=true;
+}
+
+function send(j,d){const [lo,hi]=LIM[j];d=Math.max(lo,Math.min(hi,d));
+  $('s'+j).value=d;$('n'+j).value=d.toFixed(1);post('/api/joint',{joint:j,deg:d});}
+
+$('btnEnable').onclick=()=>{
+  if(enabled && !confirm('DISABLE cuts torque to all joints — the arm will DROP under gravity.\n\nSupport it or lower it to a rest position first. Continue?'))return;
+  post('/api/enable',{on:!enabled});
+};
+$('btnHome').onclick=()=>{post('/api/home');const R=[0,45,-60,0,45,0];J.forEach(j=>{$('s'+j).value=R[j-1];$('n'+j).value=R[j-1];});};
+$('btnEstop').onclick=()=>{if(confirm('Send EMERGENCY STOP?'))post('/api/estop');};
+$('btnRecover').onclick=()=>{if(confirm('Recover from collision?\n\nThe arm briefly goes limp while its fault clears, then re-enables — no power-cycle needed. Keep the workspace clear.'))post('/api/recover');};
+
+let mode='joint';
+function updateModeUI(){
+  // Mode now auto-switches server-side per key (Cartesian for translate/gimbal,
+  // Joint for wrist). The keyboard drives both, so it stays visible; the badge
+  // just reflects which mode the arm is currently armed in.
+  $('btnMode').textContent='ARM MODE · '+(mode==='joint'?'JOINT':'CARTESIAN');
+  $('btnMode').className=mode==='cartesian'?'on':'ghost';
+  $('cartHelp').style.display='block';
+}
+$('btnMode').onclick=()=>{mode=(mode==='joint')?'cartesian':'joint';post('/api/mode',{mode});updateModeUI();};
+
+// Key map. kind 'cart' -> Cartesian leashed jog (/api/jog): axes 0-2 translate
+// (X/Y/Z), 3-5 rotate (RX/RY/RZ, the tip-fixed gimbal). kind 'joint' -> wrist jog
+// (/api/jointjog): moves that joint directly, J1-3 stay put. rot/wrist tag colours.
+const KEYMAP={
+  // translation — arrows do X/Y, W/S do Z (no longer duplicated)
+  arrowup:   {kind:'cart',axis:0,dir:+1,glyph:'↑',fn:'forward',ax:'X+'},
+  arrowdown: {kind:'cart',axis:0,dir:-1,glyph:'↓',fn:'back',ax:'X−'},
+  arrowleft: {kind:'cart',axis:1,dir:+1,glyph:'←',fn:'left',ax:'Y+'},
+  arrowright:{kind:'cart',axis:1,dir:-1,glyph:'→',fn:'right',ax:'Y−'},
+  w:{kind:'cart',axis:2,dir:+1,glyph:'W',fn:'up',ax:'Z+'},
+  s:{kind:'cart',axis:2,dir:-1,glyph:'S',fn:'down',ax:'Z−'},
+  // gimbal — rotate the tool about a FIXED tip (Cartesian orientation)
+  u:{kind:'cart',axis:3,dir:+1,glyph:'U',fn:'roll ↺',ax:'RX+',rot:1},
+  o:{kind:'cart',axis:3,dir:-1,glyph:'O',fn:'roll ↻',ax:'RX−',rot:1},
+  i:{kind:'cart',axis:4,dir:+1,glyph:'I',fn:'pitch ↑',ax:'RY+',rot:1},
+  k:{kind:'cart',axis:4,dir:-1,glyph:'K',fn:'pitch ↓',ax:'RY−',rot:1},
+  j:{kind:'cart',axis:5,dir:+1,glyph:'J',fn:'yaw ←',ax:'RZ+',rot:1},
+  l:{kind:'cart',axis:5,dir:-1,glyph:'L',fn:'yaw →',ax:'RZ−',rot:1},
+  // wrist joints — J1-3 fixed, tip NOT fixed (moves in an arc)
+  a:{kind:'joint',joint:3,dir:+1,glyph:'A',fn:'J4 +',ax:'joint4',wrist:1},
+  d:{kind:'joint',joint:3,dir:-1,glyph:'D',fn:'J4 −',ax:'joint4',wrist:1},
+  q:{kind:'joint',joint:4,dir:+1,glyph:'Q',fn:'J5 +',ax:'joint5',wrist:1},
+  e:{kind:'joint',joint:4,dir:-1,glyph:'E',fn:'J5 −',ax:'joint5',wrist:1},
+  z:{kind:'joint',joint:5,dir:+1,glyph:'Z',fn:'J6 +',ax:'joint6',wrist:1},
+  c:{kind:'joint',joint:5,dir:-1,glyph:'C',fn:'J6 −',ax:'joint6',wrist:1},
+};
+const held=new Set();
+const capId=k=>'kc_'+k.replace('arrow','arr_');
+function kcapHTML(k){
+  if(k==='') return '<div class="kcap blank"></div>';
+  const m=KEYMAP[k];
+  return `<div class="kcap${m.rot?' rot':''}${m.wrist?' wrist':''}" id="${capId(k)}" data-k="${k}">`+
+    `<div class="glyph">${m.glyph}</div><div class="fn">${m.fn}</div><div class="ax">${m.ax}</div></div>`;
+}
+function buildKeyboard(){
+  const transXY=[['','arrowup',''],['arrowleft','arrowdown','arrowright']];
+  const transZ=[['w'],['s']];
+  const gimbal=[['u','i','o'],['j','k','l']];
+  const wrist=[['a','q','z'],['d','e','c']];
+  const cluster=(name,rows)=>`<div class="kcluster"><div class="kcname">${name}</div>`+
+    rows.map(r=>`<div class="krow">${r.map(kcapHTML).join('')}</div>`).join('')+`</div>`;
+  $('kbd').innerHTML=cluster('Translate · X/Y',transXY)+cluster('· Z',transZ)+
+    cluster('Gimbal · tip fixed',gimbal)+cluster('Wrist joints · base fixed',wrist);
+  $('kbd').querySelectorAll('.kcap[data-k]').forEach(el=>{
+    const k=el.dataset.k;
+    const dn=e=>{e.preventDefault();startJog(k);};
+    const up=e=>{e.preventDefault();stopJog(k);};
+    el.addEventListener('mousedown',dn); el.addEventListener('mouseup',up);
+    el.addEventListener('mouseleave',up);
+    el.addEventListener('touchstart',dn,{passive:false});
+    el.addEventListener('touchend',up,{passive:false});
+  });
+}
+function setDown(k,on){const el=$(capId(k));if(el)el.classList.toggle('down',on);}
+function startJog(k){
+  if(!enabled||held.has(k))return;
+  const m=KEYMAP[k];held.add(k);setDown(k,true);
+  if(m.kind==='joint') post('/api/jointjog',{joint:m.joint,dir:m.dir,on:true});
+  else post('/api/jog',{axis:m.axis,dir:m.dir,on:true});
+}
+function stopJog(k){
+  if(!held.has(k))return;
+  const m=KEYMAP[k];held.delete(k);setDown(k,false);
+  if(m.kind==='joint') post('/api/jointjog',{joint:m.joint,dir:m.dir,on:false});
+  else post('/api/jog',{axis:m.axis,dir:m.dir,on:false});
+}
+function releaseAll(){
+  if(!held.size)return;
+  held.forEach(k=>setDown(k,false));held.clear();
+  post('/api/jogstop');
+}
+document.addEventListener('keydown',ev=>{
+  const k=ev.key.toLowerCase();
+  if(!(k in KEYMAP))return;
+  if(ev.target && /^(INPUT|TEXTAREA)$/.test(ev.target.tagName))return;
+  if(!enabled)return;   // keys auto-switch mode server-side (cart vs wrist joint)
+  ev.preventDefault(); startJog(k);
+});
+document.addEventListener('keyup',ev=>{
+  const k=ev.key.toLowerCase();
+  if(!(k in KEYMAP))return;
+  if(held.has(k)){ev.preventDefault();stopJog(k);}   // always release a held key, even from an input
+});
+// safety: never leave a key stuck if the window loses focus or is hidden
+window.addEventListener('blur',releaseAll);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)releaseAll();});
+
+setInterval(()=>post('/api/heartbeat'),400);
+
+async function poll(){
+  try{
+    const r=await fetch('/api/state'); const s=await r.json();
+    if(s.error){$('hb').textContent='error: '+s.error;return;}
+    LIM=s.limits; GR=s.gripper_range;
+    if(!built) build();
+    enabled=s.enabled;
+    if(!enabled) releaseAll();   // disabled/e-stopped -> drop any held jog keys
+    if(s.mode && s.mode!==mode){mode=s.mode;updateModeUI();}
+    if(s.pose_current){const p=s.pose_current;
+      let st=s.arm_status||'';
+      let warn=/EXCEEDS_LIMIT|COLLISION|ERR|ABNORMAL/i.test(st)?'  ⚠ '+st+' — jog to a normal pose in JOINT mode first':(st?'  ['+st+']':'');
+      if(s.guard&&s.time-s.guard.time<10) warn+='  ⚠ IK guard held the arm: '+s.guard.reason;
+      $('posenow').textContent='TCP  X '+p[0].toFixed(0)+'  Y '+p[1].toFixed(0)+'  Z '+p[2].toFixed(0)+' mm'+warn;}
+    const st=$('status');
+    st.textContent=s.estopped?'E-STOPPED':(s.enabled?'ENABLED':'DISABLED');
+    st.className='badge '+(s.enabled?'live':'halt');
+    $('btnEnable').textContent=s.enabled?'DISABLE MOTORS':'ENABLE MOTORS';
+    $('btnEnable').className=s.enabled?'on':'off';
+    $('hb').textContent='streaming @20Hz'+(s.enabled?'':' (idle)');
+    J.forEach(j=>{
+      const c=s.current[j-1],t=s.targets[j-1];
+      $('v'+j).innerHTML=`<span class="cur">${c.toFixed(1)}°</span> → ${t.toFixed(1)}°`;
+      if(document.activeElement!==$('n'+j))$('n'+j).value=t.toFixed(1);
+    });
+    if(document.activeElement!==$('ss')&&document.activeElement!==$('ns')){
+      $('ss').value=s.speed; $('ns').value=s.speed;
+      $('vs').innerHTML=`<span class="cur">${s.speed}%</span>`;
+    }
+    $('vg').innerHTML=`<span class="cur">${s.gripper_mm.toFixed(0)}mm</span>`;
+    $('log').innerHTML = s.log.length ? s.log.map(e=>
+      `<div><span class="sub">${e.t}</span> <span class="fn">${e.fn}</span>(${
+        Object.entries(e.params).map(([k,v])=>`${k}=${v}`).join(', ')})</div>`).join('')
+      : '<div class="empty">No calls yet.</div>';
+  }catch(e){$('hb').textContent='disconnected — arm will stop';}
+}
+setInterval(poll,300); poll();
+</script></body></html>

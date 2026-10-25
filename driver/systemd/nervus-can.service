@@ -1,0 +1,12 @@
+[Unit]
+Description=NervusOS hardware layer: bring up can0 for the PiPER arm
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/nervus/can-up can0
+
+[Install]
+WantedBy=multi-user.target

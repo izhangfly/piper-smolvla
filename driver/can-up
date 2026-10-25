@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Bring a SocketCAN interface up at the PiPER's bit rate (1 Mbit/s).
+# Called at boot by nervus-can.service and on USB hot-plug by the udev rule.
+set -u
+IFACE="${1:-can0}"
+BITRATE="${NERVUS_CAN_BITRATE:-1000000}"
+ip link show "$IFACE" >/dev/null 2>&1 || { echo "$IFACE not present"; exit 0; }
+ip link set "$IFACE" down 2>/dev/null
+ip link set "$IFACE" type can bitrate "$BITRATE"
+ip link set "$IFACE" txqueuelen 1000
+ip link set "$IFACE" up
+echo "$IFACE up at $BITRATE bit/s"

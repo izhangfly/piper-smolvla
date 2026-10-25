@@ -1,0 +1,2 @@
+# Re-apply the PiPER CAN settings whenever a CAN adapter is plugged in.
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="can[0-9]*", RUN+="/usr/libexec/nervus/can-up %k"

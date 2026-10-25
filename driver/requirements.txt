@@ -1,0 +1,2 @@
+piper_sdk>=0.6.1
+python-can>=4.3

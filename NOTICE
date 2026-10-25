@@ -1,0 +1,60 @@
+PiPER SmolVLA
+Copyright 2026 Ian Zhang (izhangfly)
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project reuses code and ideas from the projects below. Copied or adapted code is marked in the source
+with a one-line "Adapted from <repo>/<path>" comment.
+
+From other projects
+-------------------
+
+huggingface/lerobot (Apache-2.0, Copyright The HuggingFace Inc. team)
+  LeRobot 0.4.4 is the runtime dependency: lerobot-train does the training, and the async-inference
+  PolicyServer and RobotClient run the policy. piper_smolvla/run.py run_client() follows
+  src/lerobot/async_inference/robot_client.py (async_client); piper_smolvla/serve.py serve() follows
+  src/lerobot/async_inference/policy_server.py (serve) and subclasses PolicyServer. piper_smolvla/base.py works
+  around huggingface/lerobot#4517 (stale input_features when fine-tuning smolvla_base).
+
+lerobot/smolvla_base (Apache-2.0)
+  The pretrained SmolVLA weights every fine-tune starts from (SmolVLA: Smol Models for Vision-Language-Action,
+  Hugging Face, 2025). Downloaded at training time, not included here.
+
+AgRoboticsResearch/lerobot_robot_piper (Apache-2.0)
+  The LeRobot robot-plugin layout: a RobotConfig subclass registered under a robot type next to a Robot
+  subclass (lerobot_robot_piper/config_piper.py, piper.py), observation/action feature dictionaries, clamping
+  joint targets to the hardware limits, and the async-inference usage. piper_smolvla/config.py, robot.py.
+
+dk2472780158-ctrl/piper-dual-arm-smolvla-towel-folding (Apache-2.0)
+  From smolvla_piper_towel/scripts/smolvla_piper_execute_safe.py: the tracking-error safety stop, stepping
+  each command from the previous one (limit_command), holding the measured pose on every exit without
+  disabling the motors, and a dry run as the default way to try a policy. piper_smolvla/safety.py, robot.py.
+
+jokeru8/piper_lerobot (Apache-2.0, Copyright 2026 jokeru8)
+  piper_smolvla/keyboard.py is src/lerobot/robots/piper_follower/keyboard_stop.py with the home key removed
+  (its licence header is kept). The dry-command idea (process everything, write nothing) informed the
+  dry-run mode.
+
+zhitaoqiu/Piper-SmolVla
+  From scripts/deploy_smolvla.py: the stagnation stop (a run whose arm stays still ends). From
+  scripts/run_train_4090_smolvla_twoobj200.sh: the GPU free-memory precheck and
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True on the training box. Its training entry point also
+  confirmed the input-features problem that base.py solves.
+
+zhaoyufei122/piper-smolvla
+  SMOLVLA.md: the CUDA profile's numbers (batch 64, 20,000 steps, about two hours on one RTX 4090) and the
+  practice of copying a checkpoint's whole pretrained_model/ directory back, never only the weights.
+
+lykycy123/lerobot-piper (Apache-2.0), Kane1440/lerobot_piper2, WilbertYuan/lerobot_piper3
+  Read for their PiPER robot classes and remote-GPU training workflow; no code was taken.
+
+From NervusOS (github.com/izhangfly/NervusOS-Cambridge, same author)
+-------------------------------------------------------------------
+
+act/engine/nervus_act/sim.py      -> piper_smolvla/sim.py (simulated driver and cameras)
+act/engine/nervus_act/hardware.py -> piper_smolvla/clients.py (driver client, latest-frame camera thread)
+act/engine/nervus_act/runner.py   -> piper_smolvla/safety.py (clamps, step and lead limits, grasp latch, scene
+                                     check), robot.py (refusals, hold and release), run.py (start-pose move)
+act/mac/build.py                  -> piper_smolvla/data.py (training-set build, idle trim, facts)
+act/mac/train_supervisor.py       -> piper_smolvla/supervisor.py (crash, hang and NaN recovery with resume)
+act/mac/worker.py                 -> piper_smolvla/train.py (publishing layout, nervus_policy.json fields)

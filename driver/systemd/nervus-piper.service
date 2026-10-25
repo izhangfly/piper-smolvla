@@ -1,0 +1,24 @@
+[Unit]
+Description=PiPER arm driver (piper_webctl on can0)
+Documentation=file:///opt/nervus/piper/README.md
+# Started by the apps (nervus-standalone) or by hand: systemctl start nervus-piper
+After=nervus-can.service
+Wants=nervus-can.service
+
+[Service]
+Type=simple
+User=nervus-piper
+Group=nervus-piper
+WorkingDirectory=/opt/nervus/piper
+# Loopback only: the HTTP API moves the arm and has no authentication.
+ExecStart=/opt/nervus/piper/venv/bin/python /opt/nervus/piper/piper_webctl.py --bind 127.0.0.1 --port 8770 --iface can0 --speed 15
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_CAN AF_NETLINK
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nervus-piper

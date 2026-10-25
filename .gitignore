@@ -1,0 +1,7 @@
+# Python packaging and test caches
+*.egg-info/
+.pytest_cache/
+# Runs, datasets and checkpoints never belong in git
+outputs/
+logs/
+*.safetensors

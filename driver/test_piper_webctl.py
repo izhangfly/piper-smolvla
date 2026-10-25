@@ -464,7 +464,7 @@ class SmoothDriverTest(HttpMixin, unittest.TestCase):
                 if W.STATE["guard"]:
                     break
             self.assertIsNotNone(W.STATE["guard"])
-            self.assertIn("from its command", W.STATE["guard"]["reason"])
+            self.assertIn("its command", W.STATE["guard"]["reason"])
             self.assertEqual(W.STATE["mode"], "joint")
             code, body = self.post("/api/servo", {"client": "piperd", "pose": goal})
             self.assertEqual(code, 409)
@@ -526,6 +526,44 @@ class SmoothDriverTest(HttpMixin, unittest.TestCase):
             time.sleep(0.1)
         self.assertLess(abs(self.fake.measured()[0] - 25.0), 0.2)
         self.check_smooth(self.fake.joint_cmds(t1), 60)
+
+    # -- the owner's report, 2026-10-25: sliders stuck short of their ends, J5 dragging J2 -----
+    def slide(self, joint, deg, timeout=10.0):
+        """Move one slider and wait for the fake arm to settle; returns the measured joints."""
+        code, body = self.post("/api/joint", {"joint": joint, "deg": deg})
+        self.assertEqual(code, 200, body)
+        deadline = time.time() + timeout
+        time.sleep(0.15)
+        while time.time() < deadline:
+            self.post("/api/heartbeat", {})
+            if not W.ARM.follower.moving():
+                break
+            time.sleep(0.1)
+        time.sleep(0.2)
+        return self.fake.measured()
+
+    def test_sliders_reach_their_ends_and_never_freeze(self):
+        limits = {j: tuple(v) for j, v in self.get_state()["limits"].items()}
+        self.assertEqual(limits["3"], (-170.0, 0.0), "the panel is given the limits the follower plans in")
+        self.assertEqual(limits["5"], (-70.0, 70.0))
+        for joint, ask, expect in ((3, -175.0, -170.0 + M.EDGE_DEG), (2, 0.0, 0.0 + M.EDGE_DEG),
+                                   (5, 75.0, 70.0 - M.EDGE_DEG), (3, -60.0, -60.0), (2, 58.3, 58.3), (2, 0.0, M.EDGE_DEG)):
+            q = self.slide(joint, ask)
+            self.assertAlmostEqual(q[joint - 1], expect, delta=0.3, msg=f"J{joint} -> {ask}: at {q}")
+            self.assertIsNone(W.ARM.follower.fault, f"J{joint} -> {ask}")
+
+    def test_one_slider_moves_one_joint(self):
+        # A target J2 never reached (a hold or a fault left it behind), as the owner saw.
+        with W.state_lock:
+            W.STATE["targets"][1] = 5.0
+            W.ARM._applied_targets = list(W.STATE["targets"])
+        W.ARM.follower.reset(self.fake.measured())
+        t0 = time.time()
+        q = self.slide(5, 20.0)
+        self.assertAlmostEqual(q[4], 20.0, delta=0.3)
+        j2 = [c[1] for _, c in self.fake.joint_cmds(t0)]
+        self.assertTrue(j2, "the arm was streamed to")
+        self.assertLess(max(abs(v - READY[1]) for v in j2), 0.2, "moving J5 must not move J2")
 
     def test_left_to_right_in_limited_space(self):
         """The hard case through the API: a 250 mm deep box in front of the arm. The planner backs

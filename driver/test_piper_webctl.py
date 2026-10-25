@@ -102,7 +102,7 @@ class FakePiper:
         return NS(end_pose=NS(X_axis=x, Y_axis=y, Z_axis=z, RX_axis=rx, RY_axis=ry, RZ_axis=rz))
 
     def GetArmStatus(self):
-        s = NS(ctrl_mode=1, arm_status=0, teach_status=0, motion_status=0, mode_feed=0, err_status=NS())
+        s = NS(ctrl_mode=getattr(self, "ctrl_mode", 1), arm_status=0, teach_status=0, motion_status=0, mode_feed=0, err_status=NS())
         return NS(time_stamp=time.time(), arm_status=s)
 
     def GetArmGripperMsgs(self):
@@ -564,6 +564,18 @@ class SmoothDriverTest(HttpMixin, unittest.TestCase):
         j2 = [c[1] for _, c in self.fake.joint_cmds(t0)]
         self.assertTrue(j2, "the arm was streamed to")
         self.assertLess(max(abs(v - READY[1]) for v in j2), 0.2, "moving J5 must not move J2")
+
+    def test_enable_refused_in_teach_mode(self):
+        """PiPER manual 2.11: leave drag-teach mode only at zero, with the button; Enable must not do it."""
+        with self.fake.lock:
+            self.fake.ctrl_mode = 0x02
+        try:
+            code, body = self.post("/api/enable", {"on": True})
+            self.assertEqual(code, 409)
+            self.assertIn("teach", body["error"])
+        finally:
+            with self.fake.lock:
+                self.fake.ctrl_mode = 0x01
 
     def test_left_to_right_in_limited_space(self):
         """The hard case through the API: a 250 mm deep box in front of the arm. The planner backs

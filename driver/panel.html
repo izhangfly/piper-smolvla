@@ -145,7 +145,18 @@ const $=id=>document.getElementById(id);
 const pct=(v,lo,hi)=>((v-lo)/(hi-lo))*100;
 const deg=(p,lo,hi)=>lo+(p/100)*(hi-lo);
 
-async function post(u,b){try{await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});}catch(e){}}
+// Refusals of the one-shot commands (Enable, Home, Recover) are shown; the high-rate ones (sliders, jog) only
+// in the status line, so a held key can't flood the screen with dialogs.
+const SHOW_ERRORS=['/api/enable','/api/home','/api/recover','/api/estop'];
+async function post(u,b){
+  try{
+    const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+    if(!r.ok){
+      let msg='HTTP '+r.status;try{const j=await r.json();msg=j.error||msg;}catch(e){}
+      if(SHOW_ERRORS.includes(u))alert('The driver refused: '+msg);else $('hb').textContent='refused: '+msg;
+    }
+  }catch(e){if(SHOW_ERRORS.includes(u))alert('The arm driver is not answering.');}
+}
 
 function build(){
   $('joints').innerHTML='';

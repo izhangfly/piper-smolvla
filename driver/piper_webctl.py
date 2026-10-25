@@ -136,6 +136,9 @@ IK_GUARD_RATIO = 3.0        # trip if swing > ratio x (TCP turn deg + TCP travel
 IK_GUARD_LATCH = 2.0        # s that servo goals are refused after a trip
 
 # Smooth mode. The trajectory limits, rates and planner settings are in motion.py.
+TEACH_MODE_HELP = ("The arm is in drag-teach mode (the green light on the wrist button). Drag it back to its "
+                   "zero (folded) pose, press the teach button once so the light goes off, then Enable. Leaving "
+                   "teach mode anywhere else can drop the arm (PiPER manual, section 2.11).")
 TRACK_ERR_DEG = 20.0        # measured joint this far from its command: something moved it; hold at once
 TRACK_STALL_S = 1.0         # more than LAG_PAUSE_DEG behind for this long without closing the gap
                             # by TRACK_PROGRESS_DEG: blocked; hold
@@ -1182,6 +1185,10 @@ class Handler(BaseHTTPRequestHandler):
             ARM.hold()
             return self._json(200, {"ok": True})
         if path == "/api/enable":
+            if data.get("on") and ARM.feedback_age() < FEEDBACK_STALE and ARM.status().get("ctrl_mode_code") == 0x02:
+                # PiPER manual, safety notes and 2.11: leave drag-teach mode only at the zero position, with
+                # the teach button; switching to CAN control anywhere else "may cause sudden drops".
+                return self._json(409, {"error": TEACH_MODE_HELP, "teaching": True})
             ARM.enable() if data.get("on") else ARM.disable()
             return self._json(200, {"ok": True})
         if path == "/api/recover":

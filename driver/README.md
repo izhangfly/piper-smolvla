@@ -181,6 +181,31 @@ IK; `test_motion.py` the trajectory's limits and continuity and the planner's
 choices; `test_piper_webctl.py` the driver end to end in both modes. The smooth-mode
 tests need numpy and ruckig and are skipped without them.
 
+## From the PiPER user manual (V1.0, 2025-06)
+
+| Joint | Like your | Range (manual) | Range used here | Max speed |
+|---|---|---|---|---|
+| J1 | shoulder swinging left/right (base yaw) | ±154° | ±150° | 180°/s |
+| J2 | shoulder lifting | 0..195° | 0..180° | 195°/s |
+| J3 | elbow | -175..0° | -170..0° | 180°/s |
+| J4 | forearm twist | ±102° | ±100° | 225°/s |
+| J5 | wrist bend | ±75° | ±70° | 225°/s |
+| J6 | wrist roll | ±120° | ±100° | 225°/s |
+
+"Range used here" is the stricter of the manual and piper_sdk (J6 stays at ±100°: beyond it the arm has
+dropped into its protective damp). The arm also reports its own per-joint limits and maximum speeds
+(`motor_limits` in `/api/state`); the smooth follower stays under 80 % of those.
+
+- Modified DH (mm): d1 = 123 (the shoulder axis J2 is 123 mm above the base), a3 = 285.03, d4 = 250.75,
+  a4 = -21.98, d6 = 91; working radius 626.75 mm; payload 1.5 kg; zero-position TCP (56.1, 0, 213.3) mm.
+- Base light: green flashing = normal; green steady = controller power-on fault, replug; red flashing =
+  fault or upgrade mode. Wrist (teach) button light: off = no drag-teach; green steady = drag-teach
+  recording; green flashing = replaying a recorded drag.
+- **Leaving drag-teach mode:** drag the arm back to its zero (folded) pose, press the teach button once so
+  the light goes off, then Enable. Switching to CAN control anywhere else "may cause sudden drops", so the
+  driver refuses Enable while the arm reports teach mode, and says why.
+- Power: 24 V (26 V max, at least 10 A). CAN 2.0B at 1 Mbit/s.
+
 ## Useful commands
 
 ```sh
